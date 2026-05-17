@@ -17,17 +17,7 @@ function loadKeywordPreferences() {
   const selectedKeywordsContainer = document.getElementById('selectedKeywords');
   selectedKeywordsContainer.innerHTML = '';
   
-  // 获取保存的关键词，如果没有则使用默认关键词
-  let savedKeywords = localStorage.getItem('preferredKeywords');
-  let keywords = []; // 默认无关键词
-  
-  if (savedKeywords) {
-    try {
-      keywords = JSON.parse(savedKeywords);
-    } catch (e) {
-      console.error('解析保存的关键词失败:', e);
-    }
-  }
+  const keywords = getStoredKeywords();
   
   // 显示保存的关键词
   if (keywords.length > 0) {
@@ -45,17 +35,7 @@ function loadAuthorPreferences() {
   const selectedAuthorsContainer = document.getElementById('selectedAuthors');
   selectedAuthorsContainer.innerHTML = '';
   
-  // 获取保存的作者，如果没有则为空数组
-  let savedAuthors = localStorage.getItem('preferredAuthors');
-  let authors = []; // 默认无作者
-  
-  if (savedAuthors) {
-    try {
-      authors = JSON.parse(savedAuthors);
-    } catch (e) {
-      console.error('解析保存的作者失败:', e);
-    }
-  }
+  const authors = getStoredAuthors();
   
   // 显示保存的作者
   if (authors.length > 0) {
@@ -403,19 +383,10 @@ function saveSettings() {
 
 // 重置设置
 function resetSettings() {
-  // 重置关键词
-  const selectedKeywordsContainer = document.getElementById('selectedKeywords');
-  selectedKeywordsContainer.innerHTML = '';
-  
-  // 重置作者
-  const selectedAuthorsContainer = document.getElementById('selectedAuthors');
-  selectedAuthorsContainer.innerHTML = '';
-  
-  // 显示空标签消息
-  showEmptyTagMessage();
-  showEmptyAuthorMessage();
-  
-  // 显示重置成功提示
+  localStorage.removeItem('preferredKeywords');
+  localStorage.removeItem('preferredAuthors');
+  loadKeywordPreferences();
+  loadAuthorPreferences();
   showNotification('Settings reset to default!', 'info');
 }
 
@@ -483,7 +454,7 @@ function showNotification(message, type = 'success') {
 // 获取GitHub统计数据
 async function fetchGitHubStats() {
   try {
-    const response = await fetch('https://api.github.com/repos/dw-dengwei/daily-arXiv-ai-enhanced');
+    const response = await fetch('https://api.github.com/repos/BoyuXiao/daily-arXiv-ai-enhanced');
     const data = await response.json();
     const starCount = data.stargazers_count;
     const forkCount = data.forks_count;

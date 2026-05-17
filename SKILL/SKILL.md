@@ -1,33 +1,52 @@
 ---
 name: daily-arxiv-ai-enhanced
-version: 0.1
-description: 通过URL请求，从daily-arxiv-ai-enhanced项目中获取论文json数据
+version: 0.2
+description: 获取 AI 系统 / MoE 方向的 arXiv 论文 JSON 数据
 ---
 
-# arXiv论文数据API
+# arXiv 论文数据 API（AI Systems + MoE）
 
 ## 触发条件
-用户想要获取daily-arXiv-ai-enhanced项目中的数据
-
-## 功能说明
-通过URL参数获取JSON格式的arXiv论文数据
+用户想要获取 daily-arXiv-ai-enhanced 项目中的论文数据，重点关注 AI 系统与 MoE 相关工作。
 
 ## 基础仓库 URL
-https://dw-dengwei.github.io/daily-arXiv-ai-enhanced/
+部署后替换为你的 GitHub Pages 地址，例如：
+`https://boyuxiao.github.io/daily-arXiv-ai-enhanced/`
 
-## URL参数
+## 推荐配置
+
+### GitHub Actions Variables
+```
+CATEGORIES=cs.LG, cs.DC, cs.AI
+LANGUAGE=Chinese
+MODEL_NAME=deepseek-chat
+```
+
+### 默认关注关键词（见 `js/user-preferences.js`）
+MoE、vLLM、FSDP、speculative decoding、KV cache、Triton、quantization、GPU scheduling 等。
+
+## URL 参数
 
 | 参数 | 说明 | 示例 |
 |------|------|------|
-| `category` | arXiv类别 | `cs.CV`, `cs.AI`, etc. |
+| `category` | arXiv 类别 | `cs.LG`, `cs.DC`, `cs.AI` |
 | `author` | 作者姓名 | `Smith` |
-| `keywords` | 关键词，逗号分隔 | `vision,learning` |
+| `keywords` | 关键词，逗号分隔 | `MoE,vLLM,KV cache` |
 
 ## 样例
+
+```bash
+# 按类别 + MoE 关键词筛选
+bash scripts/fetch.sh "https://boyuxiao.github.io/daily-arXiv-ai-enhanced/?category=cs.LG&keywords=MoE,mixture of experts"
+
+# 推理系统相关
+bash scripts/fetch.sh "https://boyuxiao.github.io/daily-arXiv-ai-enhanced/?category=cs.DC&keywords=vLLM,LLM serving"
+
+# 分布式训练
+bash scripts/fetch.sh "https://boyuxiao.github.io/daily-arXiv-ai-enhanced/?keywords=FSDP,tensor parallelism"
 ```
-bash scripts/fetch.sh "https://dw-dengwei.github.io/daily-arXiv-ai-enhanced/?category=cs.CV&author=Smith&keywords=deep"
-```
-这里使用到了`fetch.sh`脚本来发送请求并处理响应数据，该脚本基于NodeJS和puppeteer环境，如果没有安装则会自动安装。你不能直接wget或curl这个url，因为它需要执行JavaScript来生成最终的JSON响应。
+
+> 不能直接 `curl`/`wget` 该 URL，需通过 `fetch.sh`（Puppeteer 执行页面 JS 后返回 JSON）。
 
 ## 筛选逻辑
 
@@ -35,25 +54,25 @@ bash scripts/fetch.sh "https://dw-dengwei.github.io/daily-arXiv-ai-enhanced/?cat
 category AND (keywords OR author)
 ```
 
-- category: 硬筛选，只返回指定类别
-- keywords: 在标题和摘要中搜索
-- author: 在作者字段中搜索
-- keywords与author是"或"关系
+- **category**：硬筛选，只返回指定类别
+- **keywords**：在标题和摘要中搜索（关键词之间为「或」）
+- **author**：在作者字段中搜索
+- **keywords** 与 **author** 为「或」关系
 
-## JSON响应结构
+## JSON 响应结构
 
 ```json
 {
-  "category": "cs.CV",
-  "author": "Smith",
-  "keywords": ["deep"],
+  "category": "cs.LG",
+  "author": null,
+  "keywords": ["MoE", "vLLM"],
   "count": 10,
   "papers": [
     {
       "id": "2401.00001",
       "title": "标题",
       "authors": "作者1, 作者2",
-      "categories": ["cs.CV"],
+      "categories": ["cs.LG"],
       "summary": "tldr",
       "date": "2024-01-01",
       "url": "https://arxiv.org/abs/2401.00001"

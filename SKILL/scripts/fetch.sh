@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 参数1: URL，参数2: 超时时间（毫秒），默认60000（1分钟）
-url=${1:-"https://dw-dengwei.github.io/daily-arXiv-ai-enhanced/?category=cs.CV"}
+url=${1:-"https://boyuxiao.github.io/daily-arXiv-ai-enhanced/?category=cs.LG&keywords=MoE,vLLM,KV cache,speculative decoding,FSDP"}
 timeout=${2:-60000}
 
 # 检测 node 是否安装
