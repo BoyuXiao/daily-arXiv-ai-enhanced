@@ -13,6 +13,8 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 允许 GITHUB_TOKEN 推送到 main / data 分支
 
     steps:
     - uses: actions/checkout@v5
