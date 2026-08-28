@@ -44,12 +44,14 @@ else
     export CATEGORIES="${CATEGORIES:-cs.LG, cs.DC, cs.AI}"
     export MODEL_NAME="${MODEL_NAME:-gpt-4o-mini}"
     export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+    export OPENAI_API_MODE="${OPENAI_API_MODE:-chat_completions}"
     
     echo "🔧 当前配置 / Current configuration:"
     echo "   LANGUAGE: $LANGUAGE"
     echo "   CATEGORIES: $CATEGORIES"
     echo "   MODEL_NAME: $MODEL_NAME"
     echo "   OPENAI_BASE_URL: $OPENAI_BASE_URL"
+    echo "   OPENAI_API_MODE: $OPENAI_API_MODE"
 fi
 
 echo ""

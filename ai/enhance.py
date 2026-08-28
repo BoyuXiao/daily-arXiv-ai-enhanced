@@ -3,10 +3,9 @@ import json
 import sys
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict
+from typing import List, Dict, Protocol
 from queue import Queue
 from threading import Lock
-# INSERT_YOUR_CODE
 import requests
 
 import dotenv
@@ -27,6 +26,133 @@ if os.path.exists('.env'):
 template = open("template.txt", "r").read()
 system = open("system.txt", "r").read()
 
+
+class PaperAnalyzer(Protocol):
+    def invoke(self, values: Dict[str, str]) -> Structure:
+        ...
+
+
+class ResponsesAPIAnalyzer:
+    """Minimal OpenAI Responses API client for Responses-only relays."""
+
+    def __init__(self, model: str, api_key: str, base_url: str):
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required")
+        if not base_url:
+            raise ValueError("OPENAI_BASE_URL is required")
+
+        self.model = model
+        self.api_key = api_key
+        self.endpoint = f"{base_url.rstrip('/')}/responses"
+        self.timeout = int(os.environ.get("OPENAI_API_TIMEOUT", "180"))
+
+    @staticmethod
+    def _extract_output_text(payload: Dict) -> str:
+        # Some compatible relays expose the SDK convenience field directly.
+        if isinstance(payload.get("output_text"), str):
+            return payload["output_text"]
+
+        text_parts = []
+        for output_item in payload.get("output", []):
+            for content_item in output_item.get("content", []):
+                if content_item.get("type") in {"output_text", "text"}:
+                    text = content_item.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
+
+        if not text_parts:
+            raise ValueError(
+                f"Responses API returned no output text; response id: "
+                f"{payload.get('id', 'unknown')}"
+            )
+        return "\n".join(text_parts)
+
+    @staticmethod
+    def _strip_json_fence(text: str) -> str:
+        text = text.strip()
+        match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+        return match.group(1) if match else text
+
+    def invoke(self, values: Dict[str, str]) -> Structure:
+        language = values["language"]
+        content = values["content"]
+
+        schema = Structure.model_json_schema()
+        json_instruction = (
+            "\n\nReturn only one valid JSON object with exactly these string fields: "
+            "tldr, motivation, method, result, conclusion. Do not use Markdown fences."
+        )
+        body = {
+            "model": self.model,
+            "store": False,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": system.format(language=language),
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": template.format(content=content) + json_instruction,
+                        }
+                    ],
+                },
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "paper_analysis",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        }
+
+        max_output_tokens = os.environ.get("OPENAI_MAX_OUTPUT_TOKENS")
+        if max_output_tokens:
+            body["max_output_tokens"] = int(max_output_tokens)
+
+        reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT")
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
+
+        request_args = {
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            "timeout": self.timeout,
+        }
+        response = requests.post(self.endpoint, json=body, **request_args)
+
+        # Some Responses-compatible relays support /responses but not
+        # Structured Outputs. Retry once using the explicit JSON instruction.
+        if response.status_code in {400, 404, 422}:
+            fallback_body = dict(body)
+            fallback_body.pop("text", None)
+            response = requests.post(
+                self.endpoint,
+                json=fallback_body,
+                **request_args,
+            )
+
+        if not response.ok:
+            raise RuntimeError(
+                f"Responses API request failed ({response.status_code}): "
+                f"{response.text[:1000]}"
+            )
+
+        output_text = self._extract_output_text(response.json())
+        return Structure.model_validate_json(self._strip_json_fence(output_text))
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser()
@@ -34,7 +160,7 @@ def parse_args():
     parser.add_argument("--max_workers", type=int, default=1, help="Maximum number of parallel workers")
     return parser.parse_args()
 
-def process_single_item(chain, item: Dict, language: str) -> Dict:
+def process_single_item(chain: PaperAnalyzer, item: Dict, language: str) -> Dict:
     def is_sensitive(content: str) -> bool:
         """
         调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
@@ -167,15 +293,42 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
     """并行处理所有数据项"""
-    llm = ChatOpenAI(model=model_name).with_structured_output(Structure, method="function_calling")
-    print('Connect to:', model_name, file=sys.stderr)
-    
-    prompt_template = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(system),
-        HumanMessagePromptTemplate.from_template(template=template)
-    ])
+    configured_api_mode = os.environ.get("OPENAI_API_MODE", "auto").lower()
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
 
-    chain = prompt_template | llm
+    if configured_api_mode == "auto":
+        # This Codex relay is Responses-only. Other existing providers keep the
+        # repository's original Chat Completions behavior.
+        api_mode = (
+            "responses"
+            if "codexapi.pkudair.site" in base_url.lower()
+            else "chat_completions"
+        )
+    else:
+        api_mode = configured_api_mode
+
+    if api_mode == "responses":
+        chain = ResponsesAPIAnalyzer(
+            model=model_name,
+            api_key=os.environ.get("OPENAI_API_KEY", ""),
+            base_url=os.environ.get("OPENAI_BASE_URL", ""),
+        )
+    elif api_mode in {"chat", "chat_completions"}:
+        llm = ChatOpenAI(model=model_name).with_structured_output(
+            Structure,
+            method="function_calling",
+        )
+        prompt_template = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(system),
+            HumanMessagePromptTemplate.from_template(template=template)
+        ])
+        chain = prompt_template | llm
+    else:
+        raise ValueError(
+            "Unsupported OPENAI_API_MODE. Use 'chat_completions' or 'responses'."
+        )
+
+    print(f"Connect to: {model_name} via {api_mode}", file=sys.stderr)
     
     # 使用线程池并行处理
     processed_data = [None] * len(data)  # 预分配结果列表
