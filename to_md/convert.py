@@ -2,6 +2,7 @@ import json
 import argparse
 import os
 from itertools import count
+from pathlib import Path
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -21,7 +22,7 @@ if __name__ == "__main__":
             data.append(json.loads(line))
 
     categories = set([item["categories"][0] for item in data])
-    template = open("paper_template.md", "r").read()
+    template = Path(__file__).with_name("paper_template.md").read_text(encoding="utf-8")
     categories = sorted(categories, key=rank)
     cnt = {cate: 0 for cate in categories}
     for item in data:
@@ -43,7 +44,12 @@ if __name__ == "__main__":
                 # Safely access AI fields with default values
                 ai_data = item.get('AI', {})
                 if not ai_data or not isinstance(ai_data, dict):
-                    print(f"Skipping item '{item.get('title', 'Unknown')}' due to missing or invalid AI data")
+                    papers.append(
+                        f"### [{next(idx)}] [{item['title']}]({item['abs']})\n"
+                        f"*{', '.join(item['authors'])}*\n\n"
+                        f"Main category: {item['categories'][0]}\n\n"
+                        f"Abstract: {item['summary']}\n"
+                    )
                     continue
                 
                 # Check if all required AI fields are present
@@ -68,5 +74,7 @@ if __name__ == "__main__":
                     )
                 )
         markdown += "\n\n".join(papers)
-    with open(args.data.split('_')[0] + '.md', "w") as f:
+    source = Path(args.data)
+    output = source.with_name(source.stem.split('_AI_enhanced_')[0] + '.md')
+    with output.open("w", encoding="utf-8") as f:
         f.write(markdown)

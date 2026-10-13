@@ -21,6 +21,7 @@ concurrency:
 
 env:
   TZ: UTC
+  ENABLE_AI: ${{ vars.ENABLE_AI || 'false' }}
   LANGUAGE: ${{ vars.LANGUAGE || 'Chinese' }}
   CATEGORIES: ${{ vars.CATEGORIES || 'cs.LG, cs.DC, cs.AI' }}
   MODEL_NAME: ${{ vars.MODEL_NAME || 'deepseek-chat' }}
@@ -56,7 +57,7 @@ jobs:
 
         today=$(date -u "+%Y-%m-%d")
         echo "CRAWL_DATE=$today" >> "$GITHUB_ENV"
-        if [ "$FORCE_REFRESH" != "true" ] && python3 daily_arxiv/daily_arxiv/data_state.py "data/${today}_AI_enhanced_${LANGUAGE}.jsonl"; then
+        if [ "$FORCE_REFRESH" != "true" ] && python3 daily_arxiv/daily_arxiv/data_state.py --raw "data/${today}.jsonl" && python3 daily_arxiv/daily_arxiv/data_state.py --raw "data/${today}_AI_enhanced_${LANGUAGE}.jsonl"; then
           echo "should_run=false" >> "$GITHUB_OUTPUT"
           echo "Today's validated data is already published; skipping duplicate processing."
         else
@@ -93,10 +94,11 @@ jobs:
         scrapy crawl arxiv -o ../data/${today}.jsonl
         
         # 检查爬取是否成功 / Check if crawling was successful
-        if [ ! -f "../data/${today}.jsonl" ]; then
+        if [ ! -s "../data/${today}.jsonl" ]; then
             echo "爬取失败，未生成数据文件 / Crawling failed, no data file generated"
             exit 1
         fi
+        python daily_arxiv/data_state.py --raw "../data/${today}.jsonl"
         
         echo "crawl_date=$today" >> $GITHUB_OUTPUT
         echo "爬取完成 / Crawling completed"
@@ -142,7 +144,10 @@ jobs:
         esac
         
     - name: AI Enhancement Processing
-      if: steps.dedup_check.outputs.has_new_content == 'true'
+      id: ai_step
+      if: steps.dedup_check.outputs.has_new_content == 'true' && env.ENABLE_AI == 'true'
+      continue-on-error: true
+      timeout-minutes: 30
       env:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
@@ -167,6 +172,20 @@ jobs:
         fi
         python ../daily_arxiv/daily_arxiv/data_state.py "../data/${today}_AI_enhanced_${LANGUAGE}.jsonl"
         echo "AI增强处理完成 / AI enhancement processing completed"
+
+    - name: Prepare papers for publication
+      if: steps.dedup_check.outputs.has_new_content == 'true'
+      env:
+        AI_OUTCOME: ${{ steps.ai_step.outcome }}
+      run: |
+        source .venv/bin/activate
+        enhanced_args=()
+        if [ "$AI_OUTCOME" = "success" ]; then
+          enhanced_args=(--enhanced "data/${CRAWL_DATE}_AI_enhanced_${LANGUAGE}.jsonl")
+        fi
+        python daily_arxiv/daily_arxiv/prepare_publication.py \
+          --data "data/${CRAWL_DATE}.jsonl" --language "$LANGUAGE" "${enhanced_args[@]}"
+        python daily_arxiv/daily_arxiv/data_state.py --raw "data/${CRAWL_DATE}_AI_enhanced_${LANGUAGE}.jsonl"
         
     - name: Convert to Markdown
       if: steps.dedup_check.outputs.has_new_content == 'true'
@@ -392,13 +411,18 @@ jobs:
         RUN_STATUS: ${{ job.status }}
         SHOULD_RUN: ${{ steps.prepare.outputs.should_run }}
         HAS_NEW_CONTENT: ${{ steps.dedup_check.outputs.has_new_content }}
+        AI_OUTCOME: ${{ steps.ai_step.outcome }}
       run: |
         if [ "$RUN_STATUS" != "success" ]; then
           message="Daily update failed; inspect the failed step before retrying."
         elif [ "$SHOULD_RUN" = "false" ]; then
           message="Today's validated output already exists; duplicate processing skipped."
         elif [ "$HAS_NEW_CONTENT" = "true" ]; then
-          message="Validated AI summaries and the full history index were published."
+          if [ "$AI_OUTCOME" = "success" ]; then
+            message="Papers, optional AI summaries and the full history index were published."
+          else
+            message="Papers and original abstracts were published. AI was disabled or unavailable."
+          fi
         else
           message="No new papers after deduplication; no publication needed."
         fi

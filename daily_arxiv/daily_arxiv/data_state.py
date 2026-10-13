@@ -1,4 +1,4 @@
-"""Validate published AI output before reusing it or declaring a run successful."""
+"""Validate paper metadata independently of optional AI summaries."""
 
 import json
 import sys
@@ -26,21 +26,35 @@ def has_valid_ai(paper: dict) -> bool:
     )
 
 
-def validate_file(path: Path) -> int:
-    """Return the paper count, or reject empty, malformed and fallback output."""
+def has_valid_raw(paper: dict) -> bool:
+    return all(
+        isinstance(paper.get(field), str) and bool(paper[field].strip())
+        for field in ("id", "title", "summary")
+    ) and all(
+        isinstance(paper.get(field), list)
+        and bool(paper[field])
+        and all(isinstance(value, str) and value.strip() for value in paper[field])
+        for field in ("authors", "categories")
+    )
+
+
+def validate_file(path: Path, require_ai: bool = True) -> int:
+    """Return unique paper count; raw history may contain cross-category duplicates."""
     seen = set()
     with path.open(encoding="utf-8") as stream:
         for number, line in enumerate(stream, 1):
             if not line.strip():
                 continue
             paper = json.loads(line)
-            if not isinstance(paper, dict) or not has_valid_ai(paper):
-                raise ValueError(f"{path.name}:{number}: missing or failed AI summary")
-            if paper["id"] in seen:
+            validator = has_valid_ai if require_ai else has_valid_raw
+            if not isinstance(paper, dict) or not validator(paper):
+                detail = "missing or failed AI summary" if require_ai else "incomplete paper metadata"
+                raise ValueError(f"{path.name}:{number}: {detail}")
+            if require_ai and paper["id"] in seen:
                 raise ValueError(f"{path.name}:{number}: duplicate paper ID")
             seen.add(paper["id"])
     if not seen:
-        raise ValueError(f"{path.name}: no enhanced papers")
+        raise ValueError(f"{path.name}: no papers")
     return len(seen)
 
 
@@ -49,10 +63,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
+    parser.add_argument("--raw", action="store_true", help="Validate paper metadata without requiring AI")
     args = parser.parse_args()
     try:
-        count = validate_file(args.path)
+        count = validate_file(args.path, require_ai=not args.raw)
     except (OSError, ValueError, TypeError) as error:
-        print(f"No reusable AI output: {error}", file=sys.stderr)
+        print(f"No reusable output: {error}", file=sys.stderr)
         sys.exit(1)
-    print(f"Validated {count} enhanced papers in {args.path.name}")
+    print(f"Validated {count} papers in {args.path.name}")

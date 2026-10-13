@@ -13,7 +13,7 @@ import sys
 import os
 from datetime import datetime, timedelta, timezone
 
-from data_state import has_valid_ai
+from data_state import has_valid_raw
 
 def load_papers_data(file_path):
     """
@@ -91,15 +91,14 @@ def perform_deduplication():
         if not today_papers:
             return "no_data"
 
-        # Only published, successful AI summaries count as processed history.
-        # Raw files and legacy fallback summaries must remain eligible for retry.
+        # Publication is complete once the raw paper metadata is available.
+        # Missing AI summaries must not cause the same papers to be crawled again.
         history_ids = set()
-        language = os.environ.get("LANGUAGE") or "Chinese"
         for i in range(1, history_days + 1):
             date_str = (crawl_day - timedelta(days=i)).strftime("%Y-%m-%d")
-            history_file = f"../data/{date_str}_AI_enhanced_{language}.jsonl"
+            history_file = f"../data/{date_str}.jsonl"
             past_papers, _ = load_papers_data(history_file)
-            history_ids.update(paper["id"] for paper in past_papers if has_valid_ai(paper))
+            history_ids.update(paper["id"] for paper in past_papers if has_valid_raw(paper))
 
         print(f"历史{history_days}日去重库大小: {len(history_ids)} / History {history_days} days deduplication library size: {len(history_ids)}", file=sys.stderr)
 

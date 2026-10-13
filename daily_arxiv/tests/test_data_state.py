@@ -7,6 +7,21 @@ from data_state import AI_FIELDS, FAILURE_VALUES, validate_file
 
 
 class DataStateTests(unittest.TestCase):
+    def test_raw_output_without_ai_is_complete_even_with_legacy_duplicate_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "papers.jsonl"
+            paper = {"id": "2610.1", "title": "Paper", "summary": "Original abstract", "authors": ["Author"], "categories": ["cs.LG"]}
+            row = json.dumps(paper)
+            path.write_text(row + "\n" + row + "\n")
+            self.assertEqual(1, validate_file(path, require_ai=False))
+
+    def test_raw_output_requires_usable_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "papers.jsonl"
+            path.write_text(json.dumps({"id": "2610.1"}))
+            with self.assertRaisesRegex(ValueError, "metadata"):
+                validate_file(path, require_ai=False)
+
     def test_valid_output_can_be_reused(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "papers.jsonl"

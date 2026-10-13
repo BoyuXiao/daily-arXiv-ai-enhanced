@@ -4,15 +4,20 @@ The crawler runs in GitHub Actions. Keeping a checkout on a server does not
 schedule it there. Code is stored on `main`; published papers and the website's
 file index are stored on `data`.
 
+By default, `ENABLE_AI=false`: the daily job publishes paper titles, authors,
+categories, links and original abstracts without making any paid AI requests.
+No AI API key or model credit is required for this mode.
+
 ## Configuration
 
 In repository Settings → Secrets and variables → Actions, configure:
 
 | Kind | Name | Purpose |
 | --- | --- | --- |
-| Secret | `OPENAI_API_KEY` | Credential issued by your model provider |
-| Secret | `OPENAI_BASE_URL` | API base URL matching that credential |
-| Variable | `MODEL_NAME` | Model identifier supported by that provider |
+| Variable | `ENABLE_AI` | Defaults to `false`; set `true` to try optional summaries |
+| Secret | `OPENAI_API_KEY` | Only needed when AI is enabled |
+| Secret | `OPENAI_BASE_URL` | API base URL matching that credential; only needed for AI |
+| Variable | `MODEL_NAME` | Model identifier supported by that provider; only used for AI |
 | Variable | `OPENAI_API_MODE` | `chat_completions`, `responses`, or `auto` |
 | Variable | `CATEGORIES` | Comma-separated arXiv categories; defaults to `cs.LG, cs.DC, cs.AI` |
 | Variable | `LANGUAGE` | Summary language; defaults to `Chinese` |
@@ -34,29 +39,37 @@ Concurrent invocations are serialized.
 
 Use Actions → arXiv-daily-ai-enhanced → Run workflow on `main` for a manual run.
 Check `force` to regenerate today's output even when it already validates.
-An empty file or one containing legacy failure placeholders never counts as a
-successful daily output, so those cases are retried without `force`.
+The completion check uses raw paper metadata and the website data file; it does
+not require an AI summary. Empty files or incomplete metadata are retried.
 
 Before crawling, the workflow restores published history. Deduplication only
-skips papers with usable AI summaries in the preceding seven days, and removes
-duplicates across the configured categories. Previously failed AI summaries
-remain eligible for retry if their paper IDs appear in the new crawl.
+skips papers with published raw metadata in the preceding seven days, and
+removes duplicates across the configured categories. Missing AI summaries do
+not cause the same papers to be published again. A successful check may find no
+new papers, for example when arXiv has not posted another batch.
 
 After a successful run, verify:
 
-1. The Actions summary says validated summaries and the history index were published.
-2. `data/YYYY-MM-DD_AI_enhanced_Chinese.jsonl` on the `data` branch contains real summaries.
+1. The Actions summary says papers and the history index were published.
+2. `data/YYYY-MM-DD.jsonl` on the `data` branch contains full paper metadata.
 3. `assets/file-list.txt` on `data` lists historical dates as well as the new date.
 4. A subsequent run without `force` skips an already valid daily output.
 
-AI request errors, malformed responses and an empty enhanced batch fail the
-job. They do not replace published output with placeholders. Upstream's content
-filter behavior is retained: confirmed flags filter a paper, while a filtering
-service outage allows processing to continue.
+The website and existing CLI use the historical
+`YYYY-MM-DD_AI_enhanced_Chinese.jsonl` filename. It is also produced without AI:
+those rows contain the original metadata and omit the `AI` field, so the website
+and Markdown export display the original abstract. No failure summaries are
+inserted. The filename is retained for compatibility.
+
+When enabled, AI runs as an optional step with a 30-minute timeout. API errors,
+malformed responses or an empty enhanced batch cause that step to fail, then
+publication continues using original abstracts. Successfully enhanced rows are
+merged into the raw collection; papers without AI results are still retained.
 
 The crawler reads arXiv's current `/new` listing. Fixing the workflow does not
 automatically reconstruct every missed date or regenerate old failed summaries.
-Backfilling saved historical raw files requires a separate AI processing run.
+Summarizing saved historical raw files is optional and requires a separate AI
+processing run after model access is restored.
 
 ## Upstream updates
 
