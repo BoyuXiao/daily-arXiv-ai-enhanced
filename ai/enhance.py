@@ -4,15 +4,12 @@ import sys
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Protocol
-from queue import Queue
-from threading import Lock
 import requests
-
+from pathlib import Path
 import dotenv
 import argparse
 from tqdm import tqdm
 
-import langchain_core.exceptions
 from langchain_openai import ChatOpenAI
 from langchain.prompts import (
     ChatPromptTemplate,
@@ -20,11 +17,13 @@ from langchain.prompts import (
     HumanMessagePromptTemplate,
 )
 from structure import Structure
+from content_filter import is_sensitive
+from runtime import build_chat_openai_kwargs, raise_if_processing_failed
 
 if os.path.exists('.env'):
     dotenv.load_dotenv()
-template = open("template.txt", "r").read()
-system = open("system.txt", "r").read()
+template = Path(__file__).with_name("template.txt").read_text(encoding="utf-8")
+system = Path(__file__).with_name("system.txt").read_text(encoding="utf-8")
 
 
 class PaperAnalyzer(Protocol):
@@ -36,6 +35,11 @@ class ResponsesAPIAnalyzer:
     """Minimal OpenAI Responses API client for Responses-only relays."""
 
     def __init__(self, model: str, api_key: str, base_url: str):
+        model = model.strip()
+        api_key = api_key.strip()
+        base_url = base_url.strip()
+        if not model:
+            raise ValueError("MODEL_NAME is required")
         if not api_key:
             raise ValueError("OPENAI_API_KEY is required")
         if not base_url:
@@ -161,29 +165,6 @@ def parse_args():
     return parser.parse_args()
 
 def process_single_item(chain: PaperAnalyzer, item: Dict, language: str) -> Dict:
-    def is_sensitive(content: str) -> bool:
-        """
-        调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
-        返回 True 表示触发敏感词，False 表示未触发。
-        """
-        try:
-            resp = requests.post(
-                "https://spam.dw-dengwei.workers.dev",
-                json={"text": content},
-                timeout=5
-            )
-            if resp.status_code == 200:
-                result = resp.json()
-                # 约定接口返回 {"sensitive": true/false, ...}
-                return result.get("sensitive", True)
-            else:
-                # 如果接口异常，默认不触发敏感词
-                print(f"Sensitive check failed with status {resp.status_code}", file=sys.stderr)
-                return True
-        except Exception as e:
-            print(f"Sensitive check error: {e}", file=sys.stderr)
-            return True
-
     def check_github_code(content: str) -> Dict:
         """提取并验证 GitHub 链接"""
         code_info = {}
@@ -240,50 +221,17 @@ def process_single_item(chain: PaperAnalyzer, item: Dict, language: str) -> Dict
     if code_info:
         item.update(code_info)
 
-    """处理单个数据项"""
-    # Default structure with meaningful fallback values
-    default_ai_fields = {
-        "tldr": "Summary generation failed",
-        "motivation": "Motivation analysis unavailable",
-        "method": "Method extraction failed",
-        "result": "Result analysis unavailable",
-        "conclusion": "Conclusion extraction failed"
-    }
-    
     try:
         response: Structure = chain.invoke({
             "language": language,
             "content": item['summary']
         })
         item['AI'] = response.model_dump()
-    except langchain_core.exceptions.OutputParserException as e:
-        # 尝试从错误信息中提取 JSON 字符串并修复
-        error_msg = str(e)
-        partial_data = {}
-        
-        if "Function Structure arguments:" in error_msg:
-            try:
-                # 提取 JSON 字符串
-                json_str = error_msg.split("Function Structure arguments:", 1)[1].strip().split('are not valid JSON')[0].strip()
-                # 预处理 LaTeX 数学符号 - 使用四个反斜杠来确保正确转义
-                json_str = json_str.replace('\\', '\\\\')
-                # 尝试解析修复后的 JSON
-                partial_data = json.loads(json_str)
-            except Exception as json_e:
-                print(f"Failed to parse JSON for {item.get('id', 'unknown')}: {json_e}", file=sys.stderr)
-        
-        # Merge partial data with defaults to ensure all fields exist
-        item['AI'] = {**default_ai_fields, **partial_data}
-        print(f"Using partial AI data for {item.get('id', 'unknown')}: {list(partial_data.keys())}", file=sys.stderr)
+        if not all(isinstance(value, str) and value.strip() for value in item['AI'].values()):
+            raise ValueError("AI response contains empty fields")
     except Exception as e:
-        # Catch any other exceptions and provide default values
         print(f"Unexpected error for {item.get('id', 'unknown')}: {e}", file=sys.stderr)
-        item['AI'] = default_ai_fields
-    
-    # Final validation to ensure all required fields exist
-    for field in default_ai_fields.keys():
-        if field not in item['AI']:
-            item['AI'][field] = default_ai_fields[field]
+        raise RuntimeError(f"AI request failed for {item.get('id', 'unknown')}") from e
 
     # 检查 AI 生成的所有字段
     for v in item.get("AI", {}).values():
@@ -293,8 +241,8 @@ def process_single_item(chain: PaperAnalyzer, item: Dict, language: str) -> Dict
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
     """并行处理所有数据项"""
-    configured_api_mode = os.environ.get("OPENAI_API_MODE", "auto").lower()
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    configured_api_mode = (os.environ.get("OPENAI_API_MODE") or "auto").strip().lower()
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
 
     if configured_api_mode == "auto":
         # This Codex relay is Responses-only. Other existing providers keep the
@@ -311,10 +259,14 @@ def process_all_items(data: List[Dict], model_name: str, language: str, max_work
         chain = ResponsesAPIAnalyzer(
             model=model_name,
             api_key=os.environ.get("OPENAI_API_KEY", ""),
-            base_url=os.environ.get("OPENAI_BASE_URL", ""),
+            base_url=base_url,
         )
     elif api_mode in {"chat", "chat_completions"}:
-        llm = ChatOpenAI(model=model_name).with_structured_output(
+        llm = ChatOpenAI(**build_chat_openai_kwargs(
+            model_name=model_name,
+            base_url=base_url,
+            api_key=os.environ.get("OPENAI_API_KEY", ""),
+        )).with_structured_output(
             Structure,
             method="function_calling",
         )
@@ -332,6 +284,7 @@ def process_all_items(data: List[Dict], model_name: str, language: str, max_work
     
     # 使用线程池并行处理
     processed_data = [None] * len(data)  # 预分配结果列表
+    processing_errors = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # 提交所有任务
         future_to_idx = {
@@ -351,28 +304,18 @@ def process_all_items(data: List[Dict], model_name: str, language: str, max_work
                 processed_data[idx] = result
             except Exception as e:
                 print(f"Item at index {idx} generated an exception: {e}", file=sys.stderr)
-                # Add default AI fields to ensure consistency
-                processed_data[idx] = data[idx]
-                processed_data[idx]['AI'] = {
-                    "tldr": "Processing failed",
-                    "motivation": "Processing failed",
-                    "method": "Processing failed",
-                    "result": "Processing failed",
-                    "conclusion": "Processing failed"
-                }
+                processing_errors.append(str(e))
+
+    raise_if_processing_failed(processing_errors)
     
     return processed_data
 
 def main():
     args = parse_args()
-    model_name = os.environ.get("MODEL_NAME", 'deepseek-chat')
+    model_name = os.environ.get("MODEL_NAME", "deepseek-chat")
     language = os.environ.get("LANGUAGE", 'Chinese')
 
-    # 检查并删除目标文件
     target_file = args.data.replace('.jsonl', f'_AI_enhanced_{language}.jsonl')
-    if os.path.exists(target_file):
-        os.remove(target_file)
-        print(f'Removed existing file: {target_file}', file=sys.stderr)
 
     # 读取数据
     data = []
@@ -399,11 +342,17 @@ def main():
         args.max_workers
     )
     
-    # 保存结果
-    with open(target_file, "w") as f:
-        for item in processed_data:
-            if item is not None:
-                f.write(json.dumps(item) + "\n")
+    retained_data = [item for item in processed_data if item is not None]
+    if not retained_data:
+        raise RuntimeError("No enhanced papers were produced; refusing to publish an empty file")
+
+    # Preserve an existing successful output if processing or writing fails.
+    temporary_file = target_file + ".tmp"
+    with open(temporary_file, "w", encoding="utf-8") as f:
+        for item in retained_data:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    os.replace(temporary_file, target_file)
+    print(f"Enhanced {len(retained_data)} / {len(data)} papers", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

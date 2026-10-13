@@ -5,29 +5,76 @@ name: arXiv-daily-ai-enhanced
 
 on:
   schedule:
-    - cron: "30 1 * * *"
+    # UTC: 01:37 and 07:37; Beijing: 09:37 and 15:37.
+    # The second run retries a missed/failed update; valid daily output is reused.
+    - cron: "37 1,7 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: Regenerate today's papers even if already published
+        type: boolean
+        default: false
 
+concurrency:
+  group: arxiv-daily-publish
+  cancel-in-progress: false
+
+env:
+  TZ: UTC
+  LANGUAGE: ${{ vars.LANGUAGE || 'Chinese' }}
+  CATEGORIES: ${{ vars.CATEGORIES || 'cs.LG, cs.DC, cs.AI' }}
+  MODEL_NAME: ${{ vars.MODEL_NAME || 'deepseek-chat' }}
+  GIT_AUTHOR_NAME: ${{ vars.NAME || 'github-actions[bot]' }}
+  GIT_AUTHOR_EMAIL: ${{ vars.EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}
 
 jobs:
   build:
 
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     permissions:
       contents: write   # 允许 GITHUB_TOKEN 推送到 main / data 分支
 
     steps:
     - uses: actions/checkout@v5
+    - name: Restore published history and check today's output
+      id: prepare
+      env:
+        FORCE_REFRESH: ${{ inputs.force || false }}
+      run: |
+        set +e
+        git ls-remote --exit-code --heads origin data > "$RUNNER_TEMP/arxiv-data-ref"
+        remote_status=$?
+        set -e
+        if [ "$remote_status" -eq 0 ]; then
+          git fetch --depth=1 origin refs/heads/data:refs/remotes/origin/data
+          git archive origin/data data | tar -x
+        elif [ "$remote_status" -ne 2 ]; then
+          echo "Could not read the data branch"
+          exit "$remote_status"
+        fi
+
+        today=$(date -u "+%Y-%m-%d")
+        echo "CRAWL_DATE=$today" >> "$GITHUB_ENV"
+        if [ "$FORCE_REFRESH" != "true" ] && python3 daily_arxiv/daily_arxiv/data_state.py "data/${today}_AI_enhanced_${LANGUAGE}.jsonl"; then
+          echo "should_run=false" >> "$GITHUB_OUTPUT"
+          echo "Today's validated data is already published; skipping duplicate processing."
+        else
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Install dependencies
+      if: steps.prepare.outputs.should_run == 'true'
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
-        uv sync
+        uv sync --locked
         
     - name: Crawl arXiv papers
       id: crawl_step
+      if: steps.prepare.outputs.should_run == 'true'
       run: |
         source .venv/bin/activate
-        today=$(date -u "+%Y-%m-%d")
+        today="$CRAWL_DATE"
         echo "开始爬取 $today 的arXiv论文... / Starting to crawl $today arXiv papers..."
         
         # 检查今日文件是否已存在，如存在则删除 / Check if today's file exists, delete if found
@@ -40,12 +87,6 @@ jobs:
         fi
         
         cd daily_arxiv
-        export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-        export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
-        export TOKEN_GITHUB=${{ secrets.TOKEN_GITHUB }}
-        export LANGUAGE="${{ vars.LANGUAGE }}"
-        export CATEGORIES="${{ vars.CATEGORIES }}"
-        export MODEL_NAME="${{ vars.MODEL_NAME }}"
         
         # 使用Scrapy爬取
         # Use Scrapy to crawl
@@ -62,6 +103,7 @@ jobs:
         
     - name: Check for duplicates
       id: dedup_check
+      if: steps.prepare.outputs.should_run == 'true'
       run: |
         source .venv/bin/activate
         echo "执行去重检查... / Performing intelligent deduplication check..."
@@ -101,16 +143,20 @@ jobs:
         
     - name: AI Enhancement Processing
       if: steps.dedup_check.outputs.has_new_content == 'true'
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        OPENAI_API_MODE: ${{ vars.OPENAI_API_MODE || 'auto' }}
+        OPENAI_REASONING_EFFORT: ${{ vars.OPENAI_REASONING_EFFORT }}
+        OPENAI_MAX_OUTPUT_TOKENS: ${{ vars.OPENAI_MAX_OUTPUT_TOKENS }}
+        OPENAI_API_TIMEOUT: ${{ vars.OPENAI_API_TIMEOUT || '180' }}
+        TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB || github.token }}
       run: |
         source .venv/bin/activate
         today=${{ steps.crawl_step.outputs.crawl_date }}
         echo "开始AI增强处理... / Starting AI enhancement processing..."
         
         cd ai
-        export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-        export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
-        export LANGUAGE="${{ vars.LANGUAGE }}"
-        export MODEL_NAME="${{ vars.MODEL_NAME }}"
         
         python enhance.py --data ../data/${today}.jsonl
         
@@ -119,6 +165,7 @@ jobs:
             echo "AI处理失败 / AI processing failed"
             exit 1
         fi
+        python ../daily_arxiv/daily_arxiv/data_state.py "../data/${today}_AI_enhanced_${LANGUAGE}.jsonl"
         echo "AI增强处理完成 / AI enhancement processing completed"
         
     - name: Convert to Markdown
@@ -127,9 +174,6 @@ jobs:
         source .venv/bin/activate
         today=${{ steps.crawl_step.outputs.crawl_date }}
         echo "转换为Markdown格式... / Converting to Markdown format..."
-        
-        # 设置环境变量 / Set environment variables
-        export LANGUAGE="${{ vars.LANGUAGE }}"
         
         cd to_md
         
@@ -152,19 +196,12 @@ jobs:
         fi
         echo "Markdown转换完成 / Markdown conversion completed"
         
-    - name: Update file list
-      if: steps.dedup_check.outputs.has_new_content == 'true'
-      run: |
-        echo "更新文件列表... / Updating file list..."
-        ls data/*.jsonl | sed 's|data/||' > assets/file-list.txt
-        echo "文件列表更新完成 / File list updated"
-
     - name: Generate password hash and inject into config
       if: steps.dedup_check.outputs.has_new_content == 'true'
+      env:
+        PASSWORD: ${{ secrets.ACCESS_PASSWORD }}
       run: |
         echo "🔐 Generating password hash for authentication..."
-
-        PASSWORD="${{ secrets.ACCESS_PASSWORD }}"
 
         if [ -z "$PASSWORD" ]; then
           echo "⚠️  WARNING: ACCESS_PASSWORD not set in Secrets"
@@ -193,27 +230,6 @@ jobs:
 
         echo "🔐 Authentication setup complete"
 
-    - name: Summary
-      run: |
-        if [ "${{ steps.dedup_check.outputs.has_new_content }}" = "true" ]; then
-          echo "✅ 工作流完成：去重发现新内容并成功处理 / Workflow completed: Smart deduplication found new content and processed successfully"
-        else
-          case "${{ steps.dedup_check.outputs.skip_reason }}" in
-            "no_new_content")
-              echo "ℹ️ 工作流完成：去重后无新内容 / Workflow completed: No new content after smart deduplication"
-              ;;
-            "processing_error")
-              echo "⚠️ 工作流完成：去重处理出错 / Workflow completed: Deduplication processing error"
-              ;;
-            "unknown_error")
-              echo "⚠️ 工作流完成：未知错误 / Workflow completed: Unknown error"
-              ;;
-            *)
-              echo "ℹ️ 工作流完成：未知原因跳过处理 / Workflow completed: Skipped for unknown reason"
-              ;;
-          esac
-        fi
-        
     - name: Inject repository info into data-config.js
       if: steps.dedup_check.outputs.has_new_content == 'true'
       run: |
@@ -239,16 +255,10 @@ jobs:
     - name: Commit code changes to main branch
       if: steps.dedup_check.outputs.has_new_content == 'true'
       run: |
-        git config --global user.email "${{ vars.EMAIL }}"
-        git config --global user.name "${{ vars.NAME }}"
+        git config user.email "$GIT_AUTHOR_EMAIL"
+        git config user.name "$GIT_AUTHOR_NAME"
         
-        # 添加所有代码文件，但排除数据文件 / Add all code files, but exclude data files
-        git add js/data-config.js
-        git add .github/
-        # 添加其他可能的代码变更，但排除 data/ 目录和 assets/file-list.txt
-        # Add other possible code changes, but exclude data/ directory and assets/file-list.txt
-        git add -A
-        git reset -- data/* assets/file-list.txt 2>/dev/null || true
+        git add js/data-config.js js/auth-config.js
         
         # 检查是否有代码变更需要提交 / Check if there are code changes to commit
         if git diff --staged --quiet; then
@@ -289,19 +299,19 @@ jobs:
         
         # 创建临时目录保存数据文件 / Create temporary directory to save data files
         mkdir -p /tmp/data_files/data
-        mkdir -p /tmp/data_files/assets
         
-        # 复制数据文件到临时目录 / Copy data files to temporary directory
-        cp -r data/* /tmp/data_files/data/ 2>/dev/null || true
-        cp assets/file-list.txt /tmp/data_files/assets/ 2>/dev/null || true
+        # Only this run's output should overwrite the latest data branch.
+        cp "data/${today}.jsonl" \
+          "data/${today}_AI_enhanced_${LANGUAGE}.jsonl" \
+          "data/${today}.md" /tmp/data_files/data/
         
         echo "数据文件已保存到临时目录 / Data files saved to temporary directory"
 
     - name: Setup and commit to data branch
       if: steps.dedup_check.outputs.has_new_content == 'true'
       run: |
-        git config --global user.email "${{ vars.EMAIL }}"
-        git config --global user.name "${{ vars.NAME }}"
+        git config user.email "$GIT_AUTHOR_EMAIL"
+        git config user.name "$GIT_AUTHOR_NAME"
         
         echo "设置 data 分支... / Setting up data branch..."
         today=${{ steps.crawl_step.outputs.crawl_date }}
@@ -336,8 +346,10 @@ jobs:
         # 从临时目录恢复数据文件 / Restore data files from temporary directory
         # 确保目录存在 / Ensure directories exist
         mkdir -p data assets
-        cp -r /tmp/data_files/data/* data/ 2>/dev/null || true
-        cp /tmp/data_files/assets/file-list.txt assets/ 2>/dev/null || true
+        cp /tmp/data_files/data/* data/
+        # Rebuild from the complete branch after restoring this run's files.
+        # Copying the pre-switch list used to hide all previous dates.
+        find data -maxdepth 1 -type f -name '*.jsonl' -printf '%f\n' | LC_ALL=C sort > assets/file-list.txt
         
         # 只添加数据文件 / Only add data files
         git add data/* 2>/dev/null || true
@@ -373,3 +385,21 @@ jobs:
             fi
           fi
         done
+
+    - name: Summary
+      if: always()
+      env:
+        RUN_STATUS: ${{ job.status }}
+        SHOULD_RUN: ${{ steps.prepare.outputs.should_run }}
+        HAS_NEW_CONTENT: ${{ steps.dedup_check.outputs.has_new_content }}
+      run: |
+        if [ "$RUN_STATUS" != "success" ]; then
+          message="Daily update failed; inspect the failed step before retrying."
+        elif [ "$SHOULD_RUN" = "false" ]; then
+          message="Today's validated output already exists; duplicate processing skipped."
+        elif [ "$HAS_NEW_CONTENT" = "true" ]; then
+          message="Validated AI summaries and the full history index were published."
+        else
+          message="No new papers after deduplication; no publication needed."
+        fi
+        echo "$message" | tee -a "$GITHUB_STEP_SUMMARY"

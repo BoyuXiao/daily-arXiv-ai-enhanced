@@ -11,7 +11,9 @@
 import json
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+from data_state import has_valid_ai
 
 def load_papers_data(file_path):
     """
@@ -40,7 +42,7 @@ def load_papers_data(file_path):
         return papers, ids
     except Exception as e:
         print(f"Error reading {file_path}: {e}", file=sys.stderr)
-        return [], set()
+        raise
 
 def save_papers_data(papers, file_path):
     """
@@ -73,7 +75,7 @@ def perform_deduplication():
              - "error": 处理错误 / Processing error
     """
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = os.environ.get("CRAWL_DATE") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_file = f"../data/{today}.jsonl"
     history_days = 7  # 向前追溯几天的数据进行对比
 
@@ -82,33 +84,44 @@ def perform_deduplication():
         return "no_data"
 
     try:
-        today_papers, today_ids = load_papers_data(today_file)
+        crawl_day = datetime.strptime(today, "%Y-%m-%d")
+        today_papers, _ = load_papers_data(today_file)
         print(f"今日论文总数: {len(today_papers)} / Today's total papers: {len(today_papers)}", file=sys.stderr)
 
         if not today_papers:
             return "no_data"
 
-        # 收集历史多日 ID 集合
+        # Only published, successful AI summaries count as processed history.
+        # Raw files and legacy fallback summaries must remain eligible for retry.
         history_ids = set()
+        language = os.environ.get("LANGUAGE") or "Chinese"
         for i in range(1, history_days + 1):
-            date_str = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-            history_file = f"../data/{date_str}.jsonl"
-            _, past_ids = load_papers_data(history_file)
-            history_ids.update(past_ids)
+            date_str = (crawl_day - timedelta(days=i)).strftime("%Y-%m-%d")
+            history_file = f"../data/{date_str}_AI_enhanced_{language}.jsonl"
+            past_papers, _ = load_papers_data(history_file)
+            history_ids.update(paper["id"] for paper in past_papers if has_valid_ai(paper))
 
         print(f"历史{history_days}日去重库大小: {len(history_ids)} / History {history_days} days deduplication library size: {len(history_ids)}", file=sys.stderr)
 
-        duplicate_ids = today_ids & history_ids
+        seen_ids = set(history_ids)
+        new_papers = []
+        for paper in today_papers:
+            paper_id = paper.get("id")
+            if not paper_id:
+                raise ValueError("Crawled paper has no ID")
+            if paper_id not in seen_ids:
+                seen_ids.add(paper_id)
+                new_papers.append(paper)
+        duplicate_count = len(today_papers) - len(new_papers)
 
-        if duplicate_ids:
-            print(f"发现 {len(duplicate_ids)} 篇历史重复论文 / Found {len(duplicate_ids)} historical duplicate papers", file=sys.stderr)
-            new_papers = [paper for paper in today_papers if paper.get('id', '') not in duplicate_ids]
+        if duplicate_count:
+            print(f"移除 {duplicate_count} 条历史或跨分类重复记录 / Removing duplicate records", file=sys.stderr)
 
             print(f"去重后剩余论文数: {len(new_papers)} / Remaining papers after deduplication: {len(new_papers)}", file=sys.stderr)
 
             if new_papers:
                 if save_papers_data(new_papers, today_file):
-                    print(f"已更新今日文件，移除 {len(duplicate_ids)} 篇重复论文 / Today's file updated, removed {len(duplicate_ids)} duplicate papers", file=sys.stderr)
+                    print(f"已更新今日文件，移除 {duplicate_count} 条重复记录 / Today's file updated", file=sys.stderr)
                     return "has_new_content"
                 else:
                     print("保存去重后的数据失败 / Failed to save deduplicated data", file=sys.stderr)
@@ -162,4 +175,4 @@ def main():
         sys.exit(2)
 
 if __name__ == "__main__":
-    main() 
+    main()
