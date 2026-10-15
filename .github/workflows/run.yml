@@ -69,6 +69,16 @@ jobs:
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
         uv sync --locked
+
+    - name: Restore metadata checkpoint
+      id: metadata_cache
+      if: steps.prepare.outputs.should_run == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/arxiv-metadata-cache
+        key: arxiv-metadata-v1-${{ env.CRAWL_DATE }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          arxiv-metadata-v1-${{ env.CRAWL_DATE }}-
         
     - name: Crawl arXiv papers
       id: crawl_step
@@ -80,10 +90,27 @@ jobs:
         
         cd daily_arxiv
         python -m daily_arxiv.crawl --output "../data/${today}.jsonl" \
+          --cache "$RUNNER_TEMP/arxiv-metadata-cache/${today}.jsonl" \
           --report "$RUNNER_TEMP/arxiv-crawl-report.json"
         
         echo "crawl_date=$today" >> $GITHUB_OUTPUT
         echo "爬取完成 / Crawling completed"
+
+    - name: Save metadata checkpoint even after a failed crawl
+      if: always() && steps.crawl_step.outcome != 'skipped' && steps.prepare.outputs.should_run == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/arxiv-metadata-cache
+        key: ${{ steps.metadata_cache.outputs.cache-primary-key }}
+
+    - name: Upload crawl diagnostic report
+      if: always() && steps.crawl_step.outcome != 'skipped' && steps.prepare.outputs.should_run == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: arxiv-crawl-report-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/arxiv-crawl-report.json
+        if-no-files-found: ignore
+        retention-days: 7
         
     - name: Check for duplicates
       id: dedup_check

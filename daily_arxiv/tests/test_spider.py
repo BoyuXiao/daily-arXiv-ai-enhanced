@@ -174,6 +174,31 @@ class SpiderTests(unittest.TestCase):
         self.assertEqual(["2610.19308"], [paper["id"] for paper in result])
         self.assertEqual([], items(list(self.spider.parse(response(body)))))
 
+    def test_listing_metadata_is_kept_and_a_later_duplicate_can_supply_abstract(self):
+        minimal = section("New submissions (showing 1 of 1 entries)", entry("2610.19308"))
+        self.assertEqual(1, len(items(list(self.spider.parse(response(minimal))))))
+        self.assertNotIn("2610.19308", self.spider.paper_metadata)
+        details = (
+            "<div class='list-title'><span>Title:</span> Tensor <b>Parallelism</b></div>"
+            "<div class='list-authors'><a>Alice</a>, <a>Bob</a></div>"
+            "<div class='list-comments'><span>Comments:</span> 12 pages</div>"
+            "<p class='mathjax'>An original<br>abstract with $x^2$.</p>"
+        )
+        full = minimal.replace("</dd>", details + "</dd>")
+        self.assertEqual([], items(list(self.spider.parse(response(full)))))
+        record = self.spider.paper_metadata["2610.19308"]
+        self.assertEqual("Tensor Parallelism", record["title"])
+        self.assertEqual(["Alice", "Bob"], record["authors"])
+        self.assertEqual("12 pages", record["comment"])
+        self.assertEqual("An original abstract with $x^2$.", record["summary"])
+
+    def test_listing_keeps_primary_category_before_secondary_categories(self):
+        body = section("New submissions (showing 1 of 1 entries)", entry(
+            "2610.19308", "<span class='primary-subject'>Machine Learning (cs.LG)</span>; Artificial Intelligence (cs.AI)",
+        ))
+        result = items(list(self.spider.parse(response(body))))
+        self.assertEqual(["cs.LG", "cs.AI"], result[0]["categories"])
+
     def test_categories_are_trimmed_and_empty_configuration_is_rejected(self):
         self.assertEqual({"cs.LG", "cs.AI"}, self.spider.target_categories)
         self.assertEqual(2, len(self.spider.start_urls))

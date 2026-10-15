@@ -19,6 +19,11 @@ NEWSPIDER_MODULE = "daily_arxiv.spiders"
 # Obey robots.txt rules
 ROBOTSTXT_OBEY = True
 
+# Listing requests are no longer implicitly delayed by per-paper API calls.
+CONCURRENT_REQUESTS_PER_DOMAIN = 1
+DOWNLOAD_DELAY = 3
+RANDOMIZE_DOWNLOAD_DELAY = False
+
 # Configure maximum concurrent requests performed by Scrapy (default: 16)
 # CONCURRENT_REQUESTS = 32
 

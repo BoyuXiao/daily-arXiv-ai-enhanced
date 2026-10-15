@@ -79,14 +79,32 @@ papers from an older date. Only a completed, recognized listing can produce a
 successful "no new papers" outcome. If `/recent` is empty, stale or inconsistent,
 it is refreshed once with a unique query parameter carried across pagination.
 HTTP failures, malformed pages, persistently incomplete pagination and metadata
-failures still fail the job. Per-page counts and dates
-are logged, and the Actions runner saves `arxiv-crawl-report.json` in
-`RUNNER_TEMP`. Existing raw data is replaced only after the new feed validates.
+failures still fail the job. Per-page counts and dates are logged. The Actions
+runner uploads `arxiv-crawl-report.json` as an artifact on success or failure;
+its `metadata` section reports listing reuse, checkpoint reuse, API requests
+and retries. Existing raw data is replaced only after the new feed validates.
+
+Metadata already present in `/new` (title, authors, categories and abstract) is
+retained. After all listings finish, only papers with missing metadata go to
+the arXiv API, in batches of up to 100 IDs. Successful API calls are at least
+three seconds apart. HTTP 429, server errors and transient failures pause all
+metadata requests with 60/120/240/480-second backoff, waiting longer when
+`Retry-After` requires it. Only missing IDs are retried; persistent failures
+stop the job without publishing an incomplete collection.
+
+Complete metadata is checkpointed before API requests and after each successful
+batch. Actions restores and saves this per-date checkpoint even if the crawl
+fails, so a new run on the same date can request only the remaining metadata.
+The checkpoint is not published as daily output. Only IDs found in a validated
+listing are eligible for reuse; category order retains the primary category.
 
 To run the same validation locally, activate the project environment and run
 `python -m daily_arxiv.crawl --output ../data/YYYY-MM-DD.jsonl` from
 `daily_arxiv/`. A verified empty result exits successfully without publishing
-or replacing an existing data file.
+or replacing an existing data file. The default checkpoint lives in
+`data/.metadata-cache/YYYY-MM-DD.jsonl`; use `--cache PATH` to choose another
+location. `run.sh` calls this same entry point. Bare `scrapy crawl arxiv`
+exports listing candidates and does not perform the batch metadata stage.
 
 Fixing the workflow does not automatically reconstruct every missed date or
 regenerate old failed summaries.

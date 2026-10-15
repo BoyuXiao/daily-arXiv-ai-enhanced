@@ -20,6 +20,8 @@ from unittest.mock import patch
 from scrapy.http import HtmlResponse
 from scrapy.settings import Settings
 from daily_arxiv import crawl
+from daily_arxiv import metadata
+from daily_arxiv.pipelines import DailyArxivPipeline
 
 scenario = os.environ["CRAWL_TEST_SCENARIO"]
 entry = "<dt><a href='/abs/2610.19308' title='Abstract'>arXiv:2610.19308</a></dt><dd><div class='list-subjects'>Machine Learning (cs.LG)</div></dd>"
@@ -40,9 +42,32 @@ class FixtureDownloader:
 
 class FixtureMetadata:
     def process_item(self, item, spider):
-        if scenario == "metadata_error":
+        if scenario == "pipeline_error":
             raise RuntimeError("Metadata service unavailable")
+        if scenario in ("metadata_error", "metadata_recovered"):
+            return item
         return {**item, "title": "Paper title", "summary": "Original abstract", "authors": ["Author"]}
+
+class FixtureResponse:
+    def __init__(self, status):
+        self.status_code = status
+        self.headers = {"Retry-After": "60"} if status == 429 else {}
+        self.content = b"<feed xmlns='http://www.w3.org/2005/Atom'><entry><id>https://arxiv.org/abs/2610.19308v1</id><title>Paper title</title><summary>Original abstract</summary><author><name>Author</name></author><category term='cs.LG'/></entry></feed>"
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+
+class FixtureSession:
+    def __init__(self):
+        self.headers = {}
+        self.calls = 0
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        status = 429 if scenario == "metadata_error" or self.calls == 1 else 200
+        return FixtureResponse(status)
+    def close(self):
+        pass
 
 settings = Settings({
     "DOWNLOADER_MIDDLEWARES": {FixtureDownloader: 1},
@@ -51,7 +76,9 @@ settings = Settings({
     "RETRY_ENABLED": False,
     "TWISTED_REACTOR": "twisted.internet.asyncioreactor.AsyncioSelectorReactor",
 })
-with patch.object(crawl, "get_project_settings", return_value=settings):
+with patch.object(crawl, "get_project_settings", return_value=settings), patch.object(
+    metadata.requests, "Session", FixtureSession,
+), patch.object(metadata.MetadataClient, "wait"):
     raise SystemExit(crawl.main())
 '''
 
@@ -102,7 +129,7 @@ class CrawlValidationTests(unittest.TestCase):
 
 class CrawlCommandTests(unittest.TestCase):
     def test_command_outputs_and_atomic_replacement(self):
-        for scenario in ("success", "empty", "malformed", "http_error", "metadata_error"):
+        for scenario in ("success", "empty", "malformed", "http_error", "pipeline_error", "metadata_error", "metadata_recovered"):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 output = root / "papers.jsonl"
@@ -116,13 +143,15 @@ class CrawlCommandTests(unittest.TestCase):
                     env={**os.environ, "PYTHONPATH": str(PROJECT), "CATEGORIES": "cs.LG",
                          "CRAWL_TEST_SCENARIO": scenario},
                 )
-                expected_code = 0 if scenario in ("success", "empty") else 1
+                expected_code = 0 if scenario in ("success", "empty", "metadata_recovered") else 1
                 self.assertEqual(expected_code, result.returncode, result.stdout + result.stderr)
                 status = json.loads(report.read_text())["status"]
-                if scenario == "success":
+                if scenario in ("success", "metadata_recovered"):
                     self.assertEqual("success", status)
                     self.assertEqual("2610.19308", json.loads(output.read_text())["id"])
                     self.assertEqual("has_papers=true\npaper_count=1\n", github_output.read_text())
+                    if scenario == "metadata_recovered":
+                        self.assertEqual(2, json.loads(report.read_text())["metadata"]["api_requests"])
                 else:
                     self.assertEqual("previous published data\n", output.read_text())
                     if scenario == "empty":

@@ -8,7 +8,7 @@ import scrapy
 
 
 def text_content(selector):
-    return " ".join(selector.xpath("string(.)").get(default="").split())
+    return " ".join(" ".join(selector.xpath(".//text()").getall()).split())
 
 
 class ArxivSpider(scrapy.Spider):
@@ -27,6 +27,7 @@ class ArxivSpider(scrapy.Spider):
             raise ValueError("CATEGORIES must contain at least one arXiv category")
         self.start_urls = [self.list_url(cat, "new") for cat in sorted(self.target_categories)]
         self.seen_ids = set()
+        self.paper_metadata = {}
         self.completed_categories = set()
         self.announced_dates = {}
         self.category_candidates = dict.fromkeys(self.target_categories, 0)
@@ -87,10 +88,19 @@ class ArxivSpider(scrapy.Spider):
 
             paper_id = re.sub(r"v\d+$", "", path[5:])
             subjects = text_content(description.css(".list-subjects"))
-            categories = {value.strip() for value in re.findall(r"\(([^)]+)\)", subjects)}
+            # The primary subject appears first; publication groups on this order.
+            categories = list(dict.fromkeys(value.strip() for value in re.findall(r"\(([^)]+)\)", subjects)))
             if not categories:
                 self.logger.warning("Missing listing categories for %s; the metadata API will supply them", paper_id)
-            papers.append({"id": paper_id, "categories": sorted(categories)})
+            title = text_content(description.css(".list-title")).removeprefix("Title:").strip()
+            comment = text_content(description.css(".list-comments")).removeprefix("Comments:").strip()
+            papers.append({
+                "id": paper_id, "categories": categories,
+                "title": title,
+                "authors": [text_content(author) for author in description.css(".list-authors a")],
+                "summary": text_content(description.css("p.mathjax")),
+                "comment": comment or None,
+            })
         return papers
 
     @staticmethod
@@ -119,6 +129,10 @@ class ArxivSpider(scrapy.Spider):
         self.category_candidates[category] += len(papers)
         unique = []
         for paper in papers:
+            # A duplicate from /new may supply the abstract missing from /recent.
+            # Keep it even when this ID has already been exported as a candidate.
+            if all(paper.get(field) for field in ("title", "summary", "authors", "categories")):
+                self.paper_metadata[paper["id"]] = dict(paper)
             if paper["id"] not in self.seen_ids:
                 self.seen_ids.add(paper["id"])
                 unique.append(paper)
