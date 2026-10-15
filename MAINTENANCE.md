@@ -66,8 +66,30 @@ malformed responses or an empty enhanced batch cause that step to fail, then
 publication continues using original abstracts. Successfully enhanced rows are
 merged into the raw collection; papers without AI results are still retained.
 
-The crawler reads arXiv's current `/new` listing. Fixing the workflow does not
-automatically reconstruct every missed date or regenerate old failed summaries.
+The crawler reads arXiv's current `/new` listing in pages of 100, including
+cross-lists whose secondary categories match the configured categories. It
+identifies replacements by their section heading, not by the last navigation
+anchor. Duplicate IDs are removed before metadata requests.
+
+If a category has no eligible entries in `/new`, or its section counts change
+during pagination or cannot be fully retrieved, the crawler checks `/recent`
+for the same announcement date and follows its pagination. This handles
+inconsistent or temporarily incomplete listing responses without importing
+papers from an older date. Only a completed, recognized listing can produce a
+successful "no new papers" outcome. If `/recent` is empty, stale or inconsistent,
+it is refreshed once with a unique query parameter carried across pagination.
+HTTP failures, malformed pages, persistently incomplete pagination and metadata
+failures still fail the job. Per-page counts and dates
+are logged, and the Actions runner saves `arxiv-crawl-report.json` in
+`RUNNER_TEMP`. Existing raw data is replaced only after the new feed validates.
+
+To run the same validation locally, activate the project environment and run
+`python -m daily_arxiv.crawl --output ../data/YYYY-MM-DD.jsonl` from
+`daily_arxiv/`. A verified empty result exits successfully without publishing
+or replacing an existing data file.
+
+Fixing the workflow does not automatically reconstruct every missed date or
+regenerate old failed summaries.
 Summarizing saved historical raw files is optional and requires a separate AI
 processing run after model access is restored.
 
