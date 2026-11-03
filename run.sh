@@ -67,12 +67,12 @@ echo "步骤1：开始爬取... / Step 1: Starting crawl..."
 
 cd daily_arxiv || exit 1
 crawl_report=$(mktemp)
-if ! python -m daily_arxiv.crawl --output "../data/${today}.jsonl" --report "$crawl_report"; then
+if ! python -m daily_arxiv.crawl --output "../data/${today}.jsonl" --date "$today" --report "$crawl_report"; then
     echo "爬取失败；诊断报告 / Crawling failed; diagnostic report: $crawl_report"
     exit 1
 fi
-if python -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["status"] != "no_new_papers")' "$crawl_report"; then
-    echo "没有新论文 / No new papers"
+if python -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["status"] not in ("no_new_papers", "awaiting_announcement"))' "$crawl_report"; then
+    echo "没有当天新论文或仍在等待公告 / No current-day papers or awaiting the announcement"
     exit 0
 fi
 

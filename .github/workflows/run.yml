@@ -5,9 +5,9 @@ name: arXiv-daily-ai-enhanced
 
 on:
   schedule:
-    # UTC: 01:37 and 07:37; Beijing: 09:37 and 15:37.
-    # The second run retries a missed/failed update; valid daily output is reused.
-    - cron: "37 1,7 * * *"
+    # UTC: 01:37, 07:37, 13:37, 19:37; retry delayed announcements through the UTC day.
+    # Valid daily output is reused, so later runs do not publish duplicates.
+    - cron: "37 1,7,13,19 * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -89,7 +89,7 @@ jobs:
         echo "开始爬取 $today 的arXiv论文... / Starting to crawl $today arXiv papers..."
         
         cd daily_arxiv
-        python -m daily_arxiv.crawl --output "../data/${today}.jsonl" \
+        python -m daily_arxiv.crawl --output "../data/${today}.jsonl" --date "$today" \
           --cache "$RUNNER_TEMP/arxiv-metadata-cache/${today}.jsonl" \
           --report "$RUNNER_TEMP/arxiv-crawl-report.json"
         
@@ -419,6 +419,7 @@ jobs:
       env:
         RUN_STATUS: ${{ job.status }}
         SHOULD_RUN: ${{ steps.prepare.outputs.should_run }}
+        CRAWL_STATUS: ${{ steps.crawl_step.outputs.crawl_status }}
         HAS_CRAWLED_PAPERS: ${{ steps.crawl_step.outputs.has_papers }}
         HAS_NEW_CONTENT: ${{ steps.dedup_check.outputs.has_new_content }}
         AI_OUTCOME: ${{ steps.ai_step.outcome }}
@@ -427,6 +428,8 @@ jobs:
           message="Daily update failed; inspect the failed step before retrying."
         elif [ "$SHOULD_RUN" = "false" ]; then
           message="Today's validated output already exists; duplicate processing skipped."
+        elif [ "$CRAWL_STATUS" = "awaiting_announcement" ]; then
+          message="arXiv has not announced today's papers for every category yet; publication deferred until the next run."
         elif [ "$HAS_CRAWLED_PAPERS" = "false" ]; then
           message="arXiv listings were checked successfully, including /recent; no new papers for the announcement dates. No publication needed."
         elif [ "$HAS_NEW_CONTENT" = "true" ]; then

@@ -9,7 +9,7 @@ import unittest
 
 # Existing test commands add daily_arxiv/daily_arxiv for standalone scripts.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from daily_arxiv.crawl import validate_crawl
+from daily_arxiv.crawl import announcement_ready, validate_crawl
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,8 @@ from daily_arxiv.pipelines import DailyArxivPipeline
 scenario = os.environ["CRAWL_TEST_SCENARIO"]
 entry = "<dt><a href='/abs/2610.19308' title='Abstract'>arXiv:2610.19308</a></dt><dd><div class='list-subjects'>Machine Learning (cs.LG)</div></dd>"
 date = "<h3>Showing new listings for Thursday, 15 October 2026</h3>"
+old_date = "<h3>Showing new listings for Wednesday, 14 October 2026</h3>"
+future_date = "<h3>Showing new listings for Friday, 16 October 2026</h3>"
 
 class FixtureDownloader:
     def process_request(self, request, spider):
@@ -35,7 +37,15 @@ class FixtureDownloader:
             return HtmlResponse(request.url, status=503, body=b"Unavailable", request=request)
         elif "/new?" in request.url:
             section = "Replacement" if scenario == "empty" else "New"
-            body = date + f"<dl><h3>{section} submissions (showing 1 of 1 entries)</h3>{entry}</dl>"
+            heading = (
+                old_date if scenario in ("stale", "stale_recent") or scenario == "mixed" and "/cs.AI/" in request.url
+                else future_date if scenario == "future" else date
+            )
+            body = heading + f"<dl><h3>{section} submissions (showing 1 of 1 entries)</h3>{entry}</dl>"
+        elif scenario in ("stale", "mixed"):
+            body = f"<dl><h3>Wed, 14 Oct 2026 (showing 1 of 1 entries)</h3>{entry}</dl>"
+        elif scenario == "stale_recent":
+            body = f"<dl><h3>Thu, 15 Oct 2026 (showing 1 of 1 entries)</h3>{entry}</dl>"
         else:
             body = "<dl><h3>Thu, 15 Oct 2026</h3><p>No updates for this time period.</p></dl>"
         return HtmlResponse(request.url, body=f"<div id='dlpage'>{body}</div>".encode(), encoding="utf8", request=request)
@@ -126,10 +136,27 @@ class CrawlValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "metadata"):
                 validate_crawl(self.crawler(ids=(paper["id"],)), path)
 
+    def test_announcement_is_ready_only_when_every_category_has_expected_date(self):
+        spider = SimpleNamespace(
+            target_categories={"cs.LG", "cs.AI"},
+            verified_dates={"cs.LG": "2026-10-15", "cs.AI": "2026-10-15"},
+            waiting_categories=set(),
+        )
+        self.assertTrue(announcement_ready(spider, "2026-10-15"))
+        spider.waiting_categories.add("cs.AI")
+        self.assertFalse(announcement_ready(spider, "2026-10-15"))
+        spider.waiting_categories.clear()
+        spider.verified_dates["cs.AI"] = "2026-10-14"
+        with self.assertRaisesRegex(ValueError, "Unverified announcement"):
+            announcement_ready(spider, "2026-10-15")
+
 
 class CrawlCommandTests(unittest.TestCase):
     def test_command_outputs_and_atomic_replacement(self):
-        for scenario in ("success", "empty", "malformed", "http_error", "pipeline_error", "metadata_error", "metadata_recovered"):
+        for scenario in (
+            "success", "empty", "stale", "mixed", "stale_recent", "future", "malformed", "http_error",
+            "pipeline_error", "metadata_error", "metadata_recovered",
+        ):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 output = root / "papers.jsonl"
@@ -137,26 +164,34 @@ class CrawlCommandTests(unittest.TestCase):
                 report = root / "report.json"
                 github_output = root / "github-output.txt"
                 result = subprocess.run(
-                    [sys.executable, "-c", REPLAY, "--output", str(output),
+                    [sys.executable, "-c", REPLAY, "--output", str(output), "--date", "2026-10-15",
                      "--report", str(report), "--github-output", str(github_output)],
                     cwd=PROJECT, capture_output=True, text=True, timeout=20,
-                    env={**os.environ, "PYTHONPATH": str(PROJECT), "CATEGORIES": "cs.LG",
+                    env={**os.environ, "PYTHONPATH": str(PROJECT), "CATEGORIES": "cs.LG,cs.AI" if scenario == "mixed" else "cs.LG",
                          "CRAWL_TEST_SCENARIO": scenario},
                 )
-                expected_code = 0 if scenario in ("success", "empty", "metadata_recovered") else 1
+                expected_code = 0 if scenario in ("success", "empty", "stale", "mixed", "stale_recent", "metadata_recovered") else 1
                 self.assertEqual(expected_code, result.returncode, result.stdout + result.stderr)
                 status = json.loads(report.read_text())["status"]
-                if scenario in ("success", "metadata_recovered"):
+                if scenario in ("success", "stale_recent", "metadata_recovered"):
                     self.assertEqual("success", status)
                     self.assertEqual("2610.19308", json.loads(output.read_text())["id"])
-                    self.assertEqual("has_papers=true\npaper_count=1\n", github_output.read_text())
+                    self.assertEqual("has_papers=true\npaper_count=1\ncrawl_status=success\n", github_output.read_text())
                     if scenario == "metadata_recovered":
                         self.assertEqual(2, json.loads(report.read_text())["metadata"]["api_requests"])
                 else:
                     self.assertEqual("previous published data\n", output.read_text())
                     if scenario == "empty":
                         self.assertEqual("no_new_papers", status)
-                        self.assertEqual("has_papers=false\npaper_count=0\n", github_output.read_text())
+                        self.assertEqual("has_papers=false\npaper_count=0\ncrawl_status=no_new_papers\n", github_output.read_text())
+                    elif scenario in ("stale", "mixed"):
+                        self.assertEqual("awaiting_announcement", status)
+                        report_data = json.loads(report.read_text())
+                        self.assertEqual("2026-10-14", report_data["announced_dates"]["cs.AI" if scenario == "mixed" else "cs.LG"])
+                        if scenario == "mixed":
+                            self.assertEqual(1, report_data["candidate_count"])
+                            self.assertEqual({"cs.LG": "2026-10-15"}, report_data["verified_dates"])
+                        self.assertEqual("has_papers=false\npaper_count=0\ncrawl_status=awaiting_announcement\n", github_output.read_text())
                     else:
                         self.assertEqual("failed", status)
                         self.assertFalse(github_output.exists())

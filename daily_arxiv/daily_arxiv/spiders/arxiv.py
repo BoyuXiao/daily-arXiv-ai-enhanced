@@ -16,8 +16,9 @@ class ArxivSpider(scrapy.Spider):
     allowed_domains = ["arxiv.org"]
     page_size = 100
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, expected_date=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.expected_date = expected_date
         self.target_categories = {
             value.strip()
             for value in os.environ.get("CATEGORIES", "cs.LG, cs.DC, cs.AI").split(",")
@@ -30,6 +31,8 @@ class ArxivSpider(scrapy.Spider):
         self.paper_metadata = {}
         self.completed_categories = set()
         self.announced_dates = {}
+        self.verified_dates = {}
+        self.waiting_categories = set()
         self.category_candidates = dict.fromkeys(self.target_categories, 0)
         self.new_sections = {category: {} for category in self.target_categories}
         self.recent_sections = {}
@@ -176,6 +179,11 @@ class ArxivSpider(scrapy.Spider):
         announced = datetime.strptime(date_heading[len(prefix):], "%A, %d %B %Y").date().isoformat()
         if self.announced_dates.setdefault(category, announced) != announced:
             raise ValueError(f"Announcement date changed during pagination for {category}")
+        if self.expected_date and announced > self.expected_date:
+            raise ValueError(f"arXiv announcement for {category} is {announced}, ahead of {self.expected_date}")
+        if self.expected_date and announced < self.expected_date:
+            yield self.check_recent(response, self.expected_date, f"Older /new announcement ({announced})")
+            return
 
         papers, headings = [], []
         entry_count = 0
@@ -214,6 +222,7 @@ class ArxivSpider(scrapy.Spider):
             yield self.check_recent(response, announced, "Incomplete submission sections")
         elif self.category_candidates[category]:
             self.completed_categories.add(category)
+            self.verified_dates[category] = announced
         else:
             # /new can briefly contain only replacements while /recent already
             # has new papers. Verify the same announcement date before declaring
@@ -236,6 +245,10 @@ class ArxivSpider(scrapy.Spider):
             if not match:
                 raise ValueError(f"Unrecognized recent submission date: {heading!r}")
             date = datetime.strptime(match[0], "%a, %d %b %Y").date().isoformat()
+            if self.expected_date and date > announced:
+                raise ValueError(
+                    f"arXiv /recent for {category} contains {date}, ahead of expected {announced}"
+                )
             entries = self.section_entries(section, heading)
             entry_count += len(entries)
             if date == announced:
@@ -258,7 +271,16 @@ class ArxivSpider(scrapy.Spider):
         if next_url and not reached_older_date:
             yield response.follow(next_url, callback=self.parse_recent, cb_kwargs={"announced": announced})
         elif category not in self.recent_date_seen:
-            yield self.refresh_recent(response, announced, f"Recent listing does not contain announcement date {announced}")
+            if (
+                self.expected_date == announced
+                and self.announced_dates.get(category, announced) < announced
+                and category in self.refreshed_categories
+            ):
+                self.logger.warning("arXiv has not announced %s for %s yet", announced, category)
+                self.waiting_categories.add(category)
+                self.completed_categories.add(category)
+            else:
+                yield self.refresh_recent(response, announced, f"Recent listing does not contain announcement date {announced}")
         elif len(self.recent_sections[category]["ids"]) != self.recent_sections[category]["total"]:
             yield self.refresh_recent(response, announced, f"Incomplete recent listing on {announced}")
         elif not self.recent_sections[category]["total"] and category not in self.refreshed_categories:
@@ -266,3 +288,4 @@ class ArxivSpider(scrapy.Spider):
             yield self.refresh_recent(response, announced, "No updates in cached recent listing")
         else:
             self.completed_categories.add(category)
+            self.verified_dates[category] = announced

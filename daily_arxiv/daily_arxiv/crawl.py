@@ -1,6 +1,7 @@
 """Crawl atomically and distinguish a verified empty listing from a failed crawl."""
 
 import argparse
+from datetime import date, datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -45,13 +46,26 @@ def validate_crawl(crawler, path, require_metadata=True):
     return expected
 
 
+def announcement_ready(spider, expected_date):
+    if spider.waiting_categories:
+        return False
+    missing = spider.target_categories - spider.verified_dates.keys()
+    if missing or any(day != expected_date for day in spider.verified_dates.values()):
+        raise ValueError(f"Unverified announcement dates for {expected_date}: {spider.verified_dates}")
+    return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--date", type=date.fromisoformat, help="Expected UTC announcement date")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--cache", type=Path, help="Per-date metadata checkpoint for failed-run recovery")
     parser.add_argument("--github-output", type=Path, default=os.environ.get("GITHUB_OUTPUT"))
     args = parser.parse_args(argv)
+    expected_date = args.date or date.fromisoformat(
+        os.environ.get("CRAWL_DATE", datetime.now(timezone.utc).date().isoformat())
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cache_path = args.cache or args.output.parent / ".metadata-cache" / args.output.name
     with tempfile.NamedTemporaryFile(
@@ -60,7 +74,7 @@ def main(argv=None):
         temporary = Path(stream.name)
 
     crawler = None
-    report = {"status": "failed"}
+    report = {"status": "failed", "expected_date": expected_date.isoformat()}
     try:
         settings = get_project_settings()
         settings.set("FEEDS", {str(temporary): {"format": "jsonlines", "overwrite": True}}, priority="cmdline")
@@ -69,12 +83,22 @@ def main(argv=None):
         process = CrawlerProcess(settings)
         crawler = process.create_crawler(ArxivSpider)
         errors = []
-        process.crawl(crawler).addErrback(lambda failure: errors.append(failure.getErrorMessage()))
+        process.crawl(crawler, expected_date=expected_date.isoformat()).addErrback(
+            lambda failure: errors.append(failure.getErrorMessage())
+        )
         process.start()
         if errors:
             raise ValueError("; ".join(errors))
         count = validate_crawl(crawler, temporary, require_metadata=False)
-        if count:
+        report["announced_dates"] = dict(crawler.spider.announced_dates)
+        report["verified_dates"] = dict(crawler.spider.verified_dates)
+        if not announcement_ready(crawler.spider, expected_date.isoformat()):
+            report.update(status="awaiting_announcement", paper_count=0, candidate_count=count)
+            print(
+                f"arXiv has not announced {expected_date} for "
+                f"{', '.join(sorted(crawler.spider.waiting_categories))} yet; publication deferred."
+            )
+        elif count:
             with temporary.open(encoding="utf-8") as stream:
                 candidates = [json.loads(line) for line in stream if line.strip()]
             report["metadata"] = {}
@@ -91,7 +115,12 @@ def main(argv=None):
             print("No new papers after checking the announcement dates in /new and /recent; publication skipped.")
         if args.github_output:
             with args.github_output.open("a", encoding="utf-8") as stream:
-                stream.write(f"has_papers={'true' if count else 'false'}\npaper_count={count}\n")
+                paper_count = report["paper_count"]
+                stream.write(
+                    f"has_papers={'true' if paper_count else 'false'}\n"
+                    f"paper_count={paper_count}\n"
+                    f"crawl_status={report['status']}\n"
+                )
         return 0
     except Exception as error:
         report["status"] = "failed"

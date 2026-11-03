@@ -32,9 +32,10 @@ Leave provider-specific options unset unless your provider supports them.
 
 ## Running and verifying
 
-The workflow requests runs at 01:37 and 07:37 UTC (09:37 and 15:37 Beijing time).
-The second invocation retries a missed or failed update. GitHub schedules can
-be delayed or missed; these are requested start times, not a delivery guarantee.
+The workflow requests runs at 01:37, 07:37, 13:37 and 19:37 UTC (09:37, 15:37,
+21:37 and 03:37 the next day in Beijing). Later invocations retry a delayed
+arXiv announcement or a missed/failed update. GitHub schedules can be delayed
+or missed; these are requested start times, not a delivery guarantee.
 Concurrent invocations are serialized.
 
 Use Actions → arXiv-daily-ai-enhanced → Run workflow on `main` for a manual run.
@@ -42,7 +43,13 @@ Check `force` to regenerate today's output even when it already validates.
 The completion check uses raw paper metadata and the website data file; it does
 not require an AI summary. Empty files or incomplete metadata are retried.
 
-Before crawling, the workflow restores published history. Deduplication only
+Before crawling, the workflow restores published history. The crawler checks
+each category's `/new` announcement date against the UTC publication date. If
+`/new` is old, it checks `/recent` with a cache refresh for the expected date.
+Until every category is verified for that date, it reports
+`awaiting_announcement` and publishes nothing; a later run retries. Missing
+or future announcement dates fail validation. On weekends and other dates
+without an announcement, waiting is expected. Deduplication only
 skips papers with published raw metadata in the preceding seven days, and
 removes duplicates across the configured categories. Missing AI summaries do
 not cause the same papers to be published again. A successful check may find no
@@ -99,7 +106,7 @@ The checkpoint is not published as daily output. Only IDs found in a validated
 listing are eligible for reuse; category order retains the primary category.
 
 To run the same validation locally, activate the project environment and run
-`python -m daily_arxiv.crawl --output ../data/YYYY-MM-DD.jsonl` from
+`python -m daily_arxiv.crawl --output ../data/YYYY-MM-DD.jsonl --date YYYY-MM-DD` from
 `daily_arxiv/`. A verified empty result exits successfully without publishing
 or replacing an existing data file. The default checkpoint lives in
 `data/.metadata-cache/YYYY-MM-DD.jsonl`; use `--cache PATH` to choose another

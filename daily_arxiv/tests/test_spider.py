@@ -20,8 +20,8 @@ def section(heading, content):
     return f"<dl><h3>{heading}</h3>{content}</dl>"
 
 
-def response(body, source="new", skip=0):
-    heading = "<h3>Showing new listings for Thursday, 15 October 2026</h3>" if source == "new" else ""
+def response(body, source="new", skip=0, heading_date="Thursday, 15 October 2026"):
+    heading = f"<h3>Showing new listings for {heading_date}</h3>" if source == "new" else ""
     return HtmlResponse(
         url=f"https://arxiv.org/list/cs.LG/{source}?skip={skip}&show=100",
         body=f"<html><div id='dlpage'>{heading}{body}</div></html>".encode(), encoding="utf-8",
@@ -167,6 +167,51 @@ class SpiderTests(unittest.TestCase):
         changed = response(body).replace(body=response(body).body.replace(b"15 October", b"16 October"))
         with self.assertRaisesRegex(ValueError, "date changed"):
             list(self.spider.parse(changed))
+
+    def test_old_new_listing_checks_recent_for_expected_date_without_exporting_old_papers(self):
+        self.spider.expected_date = "2026-10-15"
+        old = response(
+            section("New submissions (showing 1 of 1 entries)", entry("2610.10000")),
+            heading_date="Wednesday, 14 October 2026",
+        )
+        result = list(self.spider.parse(old))
+        self.assertEqual([], items(result))
+        self.assertEqual({"announced": "2026-10-15"}, requests(result)[0].cb_kwargs)
+        self.assertEqual(set(), self.spider.seen_ids)
+        self.assertEqual({}, self.spider.verified_dates)
+
+        current = section("Thu, 15 Oct 2026 (showing 1 of 1 entries)", entry("2610.19308"))
+        result = list(self.spider.parse_recent(response(current, "recent"), "2026-10-15"))
+        self.assertEqual(["2610.19308"], [paper["id"] for paper in items(result)])
+        self.assertEqual({"cs.LG": "2026-10-15"}, self.spider.verified_dates)
+
+    def test_old_new_and_recent_listings_wait_after_one_refresh(self):
+        self.spider.expected_date = "2026-10-15"
+        old = response(
+            section("New submissions (showing 1 of 1 entries)", entry("2610.10000")),
+            heading_date="Wednesday, 14 October 2026",
+        )
+        result = list(self.spider.parse(old))
+        stale_recent = section("Wed, 14 Oct 2026 (showing 1 of 1 entries)", entry("2610.10000"))
+        result = list(self.spider.parse_recent(response(stale_recent, "recent"), "2026-10-15"))
+        self.assertIn("refresh=", requests(result)[0].url)
+        result = list(self.spider.parse_recent(response(stale_recent, "recent"), "2026-10-15"))
+        self.assertEqual([], result)
+        self.assertEqual({"cs.LG"}, self.spider.waiting_categories)
+        self.assertEqual({"cs.LG"}, self.spider.completed_categories)
+        self.assertEqual(set(), self.spider.seen_ids)
+
+    def test_future_new_listing_is_rejected(self):
+        self.spider.expected_date = "2026-10-15"
+        future = response("<p>No updates today.</p>", heading_date="Friday, 16 October 2026")
+        with self.assertRaisesRegex(ValueError, "ahead of"):
+            list(self.spider.parse(future))
+
+    def test_future_recent_listing_is_rejected(self):
+        self.spider.expected_date = "2026-10-15"
+        current = section("Fri, 16 Oct 2026 (showing 1 of 1 entries)", entry("2610.19405"))
+        with self.assertRaisesRegex(ValueError, "ahead of"):
+            list(self.spider.parse_recent(response(current, "recent"), "2026-10-15"))
 
     def test_duplicate_ids_are_fetched_once(self):
         body = section("New submissions (showing 2 of 2 entries)", entry("2610.19308v1") + entry("2610.19308"))
